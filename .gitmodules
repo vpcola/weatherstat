@@ -1,0 +1,12 @@
+[submodule "components/ttn-esp32"]
+	path = components/ttn-esp32
+	url = https://github.com/vpcola/ttn-esp32.git
+[submodule "components/stc3100"]
+	path = components/stc3100
+	url = https://github.com/vpcola/stc3100.git
+[submodule "components/plantower5003"]
+	path = components/plantower5003
+	url = https://github.com/vpcola/plantower5003.git
+[submodule "components/sh2x"]
+	path = components/sh2x
+	url = https://github.com/vpcola/sh2x.git
