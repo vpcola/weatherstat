@@ -18,7 +18,10 @@
 #include "nvs_flash.h"
 #include "soc/rtc_cntl_reg.h"
 #include "soc/sens_reg.h"
+#include "soc/rtc_periph.h"
 #include "soc/rtc.h"
+#include "driver/gpio.h"
+#include "driver/rtc_io.h"
 
 // Components
 #include "sht21x.h"
@@ -38,14 +41,14 @@ const char *appKey = "B0A5E5F30925E5E425C9C514E80AC2CC";
 // Pins and other resources
 #define TTN_SPI_HOST      VSPI_HOST
 #define TTN_SPI_DMA_CHAN  1
-#define TTN_PIN_SPI_SCLK  18
-#define TTN_PIN_SPI_MOSI  23
-#define TTN_PIN_SPI_MISO  19
-#define TTN_PIN_NSS       5
+#define TTN_PIN_SPI_SCLK  GPIO_NUM_18
+#define TTN_PIN_SPI_MOSI  GPIO_NUM_23
+#define TTN_PIN_SPI_MISO  GPIO_NUM_19
+#define TTN_PIN_NSS       GPIO_NUM_5
 #define TTN_PIN_RXTX      TTN_NOT_CONNECTED
-#define TTN_PIN_RST       25
-#define TTN_PIN_DIO0      34
-#define TTN_PIN_DIO1      35
+#define TTN_PIN_RST       GPIO_NUM_25
+#define TTN_PIN_DIO0      GPIO_NUM_34
+#define TTN_PIN_DIO1      GPIO_NUM_35
 
 #define BOARD_5V_ENA	  GPIO_NUM_2 
 #define REGULATOR_ON	  1
@@ -56,7 +59,7 @@ const char *appKey = "B0A5E5F30925E5E425C9C514E80AC2CC";
 #define BOARD_I2C_SCL	  GPIO_NUM_22
 #define BOARD_I2C_SPEED	  100000
 
-#define DEEP_SLEEP_SECONDS	60
+#define DEEP_SLEEP_SECONDS	(60 * 10) // Wakeup every 10 minutes
 
 #define MAX_MESSAGE_LEN	  42
 
@@ -124,19 +127,79 @@ void messageReceived(const uint8_t * message, size_t length, port_t port)
 	printf("\n");
 }
 
-esp_err_t i2c_init(i2c_port_t port, gpio_num_t sda, gpio_num_t scl, uint32_t clk_speed)
+esp_err_t i2c_init(void)
 {
 	i2c_config_t config;
 	config.mode = I2C_MODE_MASTER;
-	config.sda_io_num = sda;
+	config.sda_io_num = BOARD_I2C_SDA;
 	config.sda_pullup_en = GPIO_PULLUP_ENABLE;
-	config.scl_io_num = scl;
+	config.scl_io_num = BOARD_I2C_SCL;
 	config.scl_pullup_en = GPIO_PULLUP_ENABLE;
 	config.master.clk_speed = BOARD_I2C_SPEED;
 
-	i2c_param_config(port, &config);
-	return i2c_driver_install(port, config.mode, 0, 0, 0);
+	i2c_param_config(BOARD_I2C_PORT, &config);
+	return i2c_driver_install(BOARD_I2C_PORT, config.mode, 0, 0, 0);
 }
+
+static void i2c_master_deinit(void)
+{
+    if (i2c_driver_delete(BOARD_I2C_PORT) != ESP_OK)
+        ESP_LOGE(TAG, "Failed to uninstall I2C driver!\r\n");
+        
+    gpio_reset_pin(BOARD_I2C_SDA);
+    gpio_reset_pin(BOARD_I2C_SCL);
+
+    // Isolate the I2C pins, specially since they have external
+    // pullup resistors
+    if (rtc_gpio_is_valid_gpio(BOARD_I2C_SDA))
+    {
+    	ESP_LOGI(TAG, "Isolateing SDA pin (%d)", (int) BOARD_I2C_SDA);
+    	rtc_gpio_isolate(BOARD_I2C_SDA);
+    }
+    if (rtc_gpio_is_valid_gpio(BOARD_I2C_SCL))
+    {
+    	ESP_LOGI(TAG, "Isolating SCL pin (%d)", (int) BOARD_I2C_SCL);
+    	rtc_gpio_isolate(BOARD_I2C_SCL);
+    }
+    
+    ESP_LOGI(TAG, "I2C(%d) de-initialized", (int)BOARD_I2C_PORT);
+}
+
+static esp_err_t spi_bus_init(void)
+{
+    esp_err_t err;
+
+    spi_bus_config_t spi_bus_config;
+    spi_bus_config.miso_io_num = TTN_PIN_SPI_MISO;
+    spi_bus_config.mosi_io_num = TTN_PIN_SPI_MOSI;
+    spi_bus_config.sclk_io_num = TTN_PIN_SPI_SCLK;
+    spi_bus_config.quadwp_io_num = -1;
+    spi_bus_config.quadhd_io_num = -1;
+    spi_bus_config.max_transfer_sz = 0;
+    err = spi_bus_initialize(TTN_SPI_HOST, &spi_bus_config, TTN_SPI_DMA_CHAN);
+    ESP_ERROR_CHECK(err);
+
+	  ESP_LOGI(TAG, "SPI(%d) Initialized", (int) TTN_SPI_HOST);
+    return err;
+}
+
+static void spi_bus_deinit(void)
+{
+    // free the spi bus
+    spi_bus_free(TTN_SPI_HOST);
+    
+
+    // isolate the pins
+    //if (rtc_gpio_is_valid_gpio(TTN_PIN_SPI_MISO))
+    //    rtc_gpio_isolate(TTN_PIN_SPI_MISO);
+    //if (rtc_gpio_is_valid_gpio(TTN_PIN_SPI_MOSI))
+    //    rtc_gpio_isolate(TTN_PIN_SPI_MOSI);
+    //if (rtc_gpio_is_valid_gpio(TTN_PIN_SPI_SCLK))
+    //    rtc_gpio_isolate(TTN_PIN_SPI_SCLK);
+    
+    ESP_LOGI(TAG, "SPI(%d) de-initalized", (int) TTN_SPI_HOST);
+}
+
 
 static void dustsensor_event_handler(void *event_handler_arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
@@ -176,6 +239,8 @@ static void dustsensor_init(void)
     dustsensor_hdl = dustsensor_parser_init(&config);
     /* register event handler for NMEA parser library */
     dustsensor_parser_add_handler(dustsensor_hdl, dustsensor_event_handler, NULL);
+    
+    ESP_LOGI(TAG, "Dust Sensor Initialized");
 }
 
 static void dustsensor_deinit(void)
@@ -184,15 +249,69 @@ static void dustsensor_deinit(void)
    // sleep pin here.
    if (dustsensor_parser_deinit( dustsensor_hdl ) != ESP_OK)
        ESP_LOGE(TAG, "Dustsensor de-initialization error!\r\n");
+
+   // Reset pins used by the dust sensor
+   if (rtc_gpio_is_valid_gpio(DUSTSENSOR_UART_RX))
+   	   rtc_gpio_isolate(DUSTSENSOR_UART_RX);
+   
+   ESP_LOGI(TAG, "Dust Sensor de-initialize");
+}
+
+// Initialize the on board 5V regulator
+// controlled by the BOARD_5V_ENA pin
+static void board5V_init(void)
+{
+    // RTC gpio may have the HOLD function set
+    // so clear it so that we can re-configure the pin
+    rtc_gpio_hold_dis(BOARD_5V_ENA);
+
+    // Initialize the BOARD_5V_ENA pin
+    // as an RTC IO, disable pullup and pulldown
+    rtc_gpio_init(BOARD_5V_ENA);
+    rtc_gpio_set_direction(BOARD_5V_ENA, RTC_GPIO_MODE_OUTPUT_ONLY);
+    rtc_gpio_pulldown_dis(BOARD_5V_ENA);
+    rtc_gpio_pullup_dis(BOARD_5V_ENA);
+    // Enable the 5V regulator
+    rtc_gpio_set_level(BOARD_5V_ENA, 1);
+    
+    ESP_LOGI(TAG, "Board 5V Regulator (%d) initialized", (int) BOARD_5V_ENA);
+}
+
+static void board5V_shutdown(void)
+{
+    rtc_gpio_set_level(BOARD_5V_ENA, 0); 
+    // Prevent change of levels while on deep sleep
+    rtc_gpio_hold_en(BOARD_5V_ENA);
+    
+    ESP_LOGI(TAG, "Board 5V regulator (%d) de-initialized", (int) BOARD_5V_ENA);
 }
 
 
+static void board_shutdown()
+{
+    // Shutdown RFM96W radio
+    printf("Shutting down radio ...\n");
+    ttn.shutdown();
+
+    // Shutdown SPI port
+    spi_bus_deinit();
+    
+    // Shutdown I2C port
+    i2c_master_deinit();
+    
+    // Shutdown the dust sensor
+    //dustsensor_deinit();
+
+    // Power down the 5V regulator
+    printf("Shutting down 5V regulator ...\n");
+    board5V_shutdown();
+}
 
 extern "C" void app_main(void)
 {
     esp_err_t err;
 
-		// Determine the actual sleep time
+    // Determine the actual sleep time
 		gettimeofday(&now, NULL);
 	
     // Initialize the GPIO ISR handler service
@@ -203,12 +322,8 @@ extern "C" void app_main(void)
     err = nvs_flash_init();
     ESP_ERROR_CHECK(err);
 
-    // Initialize GPIO pin for the 5V regulator
-    gpio_pad_select_gpio( BOARD_5V_ENA);
-    gpio_set_direction(BOARD_5V_ENA, GPIO_MODE_OUTPUT);
-    gpio_set_level(BOARD_5V_ENA, 1);
-
     // Initialize SPI bus
+    //spi_bus_init();
     spi_bus_config_t spi_bus_config;
     spi_bus_config.miso_io_num = TTN_PIN_SPI_MISO;
     spi_bus_config.mosi_io_num = TTN_PIN_SPI_MOSI;
@@ -218,22 +333,14 @@ extern "C" void app_main(void)
     spi_bus_config.max_transfer_sz = 0;
     err = spi_bus_initialize(TTN_SPI_HOST, &spi_bus_config, TTN_SPI_DMA_CHAN);
     ESP_ERROR_CHECK(err);
-
-    // Initialize I2C bus
-    i2c_init(BOARD_I2C_PORT, BOARD_I2C_SDA, BOARD_I2C_SCL, BOARD_I2C_SPEED); 
-    stc3100_init(BOARD_I2C_PORT, boot_count);
- 
+    
 
     // Configure the SX127x pins
     ttn.configurePins(TTN_SPI_HOST, TTN_PIN_NSS, TTN_PIN_RXTX, TTN_PIN_RST, TTN_PIN_DIO0, TTN_PIN_DIO1);
-    
-	  
     ttn.provision(devEui, appEui, appKey);
     ttn.onMessage(messageReceived);
 
-
 		ESP_LOGI(TAG, "Boot Count = %d", boot_count);
-
 
 		int sleep_time_ms = (now.tv_sec - sleep_enter_time.tv_sec) * 1000 + (now.tv_usec - sleep_enter_time.tv_usec) / 1000;
 		switch (esp_sleep_get_wakeup_cause())
@@ -251,7 +358,18 @@ extern "C" void app_main(void)
 		}    
 
 	  boot_count++;
+
+    // Initialize GPIO pin for the 5V regulator
+    board5V_init();
+
+    // Initialize I2C bus
+    i2c_init(); 
+    stc3100_init(BOARD_I2C_PORT, boot_count);
 	  
+    // Initialize the plantower sensor
+    //dustsensor_init();
+
+
     printf("Joining...\n");
     if (ttn.join())
     {
@@ -266,14 +384,9 @@ extern "C" void app_main(void)
     printf("Waiting for incoming messages (10s) ...\n");
     vTaskDelay(10 * pdMS_TO_TICKS(1000));
     
-    // Power down lora radio
-    printf("Shutting down radio ...\n");
-    ttn.shutdown();
-    
-    // Power down the 5V regulator
-    printf("Shutting down 5V regulator ...\n");
-    gpio_set_level(BOARD_5V_ENA, 0);    
-    
+    // Shutdown peripherals and prepare for deep sleep
+    board_shutdown();
+
     // Set parameters to wake up from deep sleep, 
     // currently wakeup on timeout 
     ESP_LOGI(TAG, "Enabling timer wakeup in %ds", DEEP_SLEEP_SECONDS);
@@ -282,5 +395,5 @@ extern "C" void app_main(void)
     
     gettimeofday(&sleep_enter_time, NULL);
     printf("Going deep sleep (%ds) ....\n", DEEP_SLEEP_SECONDS);
-    esp_deep_sleep_start();
+    esp_deep_sleep_start();        
 }
