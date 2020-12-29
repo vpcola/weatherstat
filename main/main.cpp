@@ -63,14 +63,16 @@ const char *appKey = "B0A5E5F30925E5E425C9C514E80AC2CC";
 #define TTN_PIN_DIO0      GPIO_NUM_34
 #define TTN_PIN_DIO1      GPIO_NUM_35
 
-#define BOARD_5V_ENA	  GPIO_NUM_2 
-#define REGULATOR_ON	  1
-#define REGULATOR_OFF	  0
+#define BOARD_5V_ENA	  	GPIO_NUM_2 		// Must be an RTC gpio
+#define REGULATOR_ON	  	1
+#define REGULATOR_OFF	  	0
 
 #define BOARD_I2C_PORT	  I2C_NUM_0
-#define BOARD_I2C_SDA	  GPIO_NUM_21
-#define BOARD_I2C_SCL	  GPIO_NUM_22
+#define BOARD_I2C_SDA	  	GPIO_NUM_21
+#define BOARD_I2C_SCL	  	GPIO_NUM_22
 #define BOARD_I2C_SPEED	  100000
+
+#define BOARD_LED					GPIO_NUM_12		// Must be an RTC gpio
 
 #define DEEP_SLEEP_SECONDS	(60 * 5) // Wakeup every 10 minutes
 
@@ -141,6 +143,10 @@ void sendMessages(void* pvParameter)
                 msg.dust_data.pm1,
                 msg.dust_data.pm25,
                 msg.dust_data.pm10);
+        		ESP_LOGI(TAG, "Concentration Unit (Environmental): PM1.0 = %d ug/cum, PM2.5 = %d ug/cum, PM10 = %d ug/cum", 
+        		    msg.dust_data.pm1_atmospheric,
+                msg.dust_data.pm25_atmospheric,
+                msg.dust_data.pm10_atmospheric);
                 						
 						hasDustData = true;
 						break;
@@ -167,42 +173,35 @@ void messageReceived(const uint8_t * message, size_t length, port_t port)
 	printf("\n");
 }
 
-esp_err_t i2c_init(void)
+esp_err_t i2c_master_init(i2c_port_t port, gpio_num_t sda, gpio_num_t scl, uint32_t clk_speed)
 {
+	esp_err_t err;
+	
 	i2c_config_t config;
 	config.mode = I2C_MODE_MASTER;
-	config.sda_io_num = BOARD_I2C_SDA;
+	config.sda_io_num = sda;
 	config.sda_pullup_en = GPIO_PULLUP_ENABLE;
-	config.scl_io_num = BOARD_I2C_SCL;
+	config.scl_io_num = scl;
 	config.scl_pullup_en = GPIO_PULLUP_ENABLE;
 	config.master.clk_speed = BOARD_I2C_SPEED;
 
-	i2c_param_config(BOARD_I2C_PORT, &config);
-	return i2c_driver_install(BOARD_I2C_PORT, config.mode, 0, 0, 0);
+	i2c_param_config(port, &config);
+	err =  i2c_driver_install(port, config.mode, 0, 0, 0);
+	
+	ESP_LOGI(TAG, "I2C Master initialized with %d", err );
+	
+	return err;
 }
 
-static void i2c_master_deinit(void)
+static void i2c_master_deinit(i2c_port_t port, gpio_num_t sda, gpio_num_t scl)
 {
-    if (i2c_driver_delete(BOARD_I2C_PORT) != ESP_OK)
+    if (i2c_driver_delete(port) != ESP_OK)
         ESP_LOGE(TAG, "Failed to uninstall I2C driver!");
         
-    gpio_reset_pin(BOARD_I2C_SDA);
-    gpio_reset_pin(BOARD_I2C_SCL);
-
-    // Isolate the I2C pins, specially since they have external
-    // pullup resistors
-    //if (rtc_gpio_is_valid_gpio(BOARD_I2C_SDA))
-    //{
-    //	ESP_LOGI(TAG, "Isolateing SDA pin (%d)", (int) BOARD_I2C_SDA);
-    //	rtc_gpio_isolate(BOARD_I2C_SDA);
-    //}
-    //if (rtc_gpio_is_valid_gpio(BOARD_I2C_SCL))
-    //{
-    //	ESP_LOGI(TAG, "Isolating SCL pin (%d)", (int) BOARD_I2C_SCL);
-    //	rtc_gpio_isolate(BOARD_I2C_SCL);
-    //}
-    
-    ESP_LOGI(TAG, "I2C(%d) de-initialized", (int)BOARD_I2C_PORT);
+    gpio_reset_pin(sda);
+    gpio_reset_pin(scl);
+  
+    ESP_LOGI(TAG, "I2C(%d) de-initialized", (int) port);
 }
 
 static esp_err_t spi_bus_init(void)
@@ -297,6 +296,31 @@ static void dustsensor_deinit(void)
    ESP_LOGI(TAG, "Dust Sensor de-initialize");
 }
 
+static void boardled_init()
+{
+	
+	  // Initialize the board led
+    rtc_gpio_init(BOARD_LED);
+    // Set the GPIO as a push/pull output 
+    rtc_gpio_set_direction(BOARD_LED, RTC_GPIO_MODE_OUTPUT_ONLY);			  
+    // Disable pullup/pulldown
+    rtc_gpio_pulldown_dis(BOARD_LED);
+    rtc_gpio_pullup_dis(BOARD_LED);
+    
+    // Turn the LED on
+    rtc_gpio_set_level(BOARD_LED, 1);
+    
+    ESP_LOGI(TAG, "Board led turned on!");
+}
+
+static void boardled_shutdown()
+{
+    // Turn off the LED
+    rtc_gpio_set_level(BOARD_LED, 0);
+   
+		ESP_LOGI(TAG, "Board led turned off!");
+}
+
 // Initialize the on board 5V regulator
 // controlled by the BOARD_5V_ENA pin
 static void board5V_init(void)
@@ -316,6 +340,8 @@ static void board5V_init(void)
     
     ESP_LOGI(TAG, "Board 5V Regulator (%d) initialized", (int) BOARD_5V_ENA);
 }
+
+
 
 static void board5V_shutdown(void)
 {
@@ -337,7 +363,7 @@ static void board_shutdown()
     spi_bus_deinit();
     
     // Shutdown I2C port
-    i2c_master_deinit();
+    i2c_master_deinit(BOARD_I2C_PORT, BOARD_I2C_SDA, BOARD_I2C_SCL);
     
     // Shutdown the dust sensor
     dustsensor_deinit();
@@ -350,6 +376,9 @@ static void board_shutdown()
 extern "C" void app_main(void)
 {
     esp_err_t err;
+    
+    // Disable deep sleep hold
+    //gpio_deep_sleep_hold_dis();
 
     // Determine the actual sleep time
 		gettimeofday(&now, NULL);
@@ -373,7 +402,11 @@ extern "C" void app_main(void)
     spi_bus_config.max_transfer_sz = 0;
     err = spi_bus_initialize(TTN_SPI_HOST, &spi_bus_config, TTN_SPI_DMA_CHAN);
     ESP_ERROR_CHECK(err);
-    
+
+    // Initialize I2C bus
+    i2c_master_init(BOARD_I2C_PORT, BOARD_I2C_SDA, BOARD_I2C_SCL, BOARD_I2C_SPEED); 
+    stc3100_init(BOARD_I2C_PORT, boot_count);
+ 
 
     // Configure the SX127x pins
     ttn.configurePins(TTN_SPI_HOST, TTN_PIN_NSS, TTN_PIN_RXTX, TTN_PIN_RST, TTN_PIN_DIO0, TTN_PIN_DIO1);
@@ -398,13 +431,13 @@ extern "C" void app_main(void)
 		}    
 
 	  boot_count++;
+		
+		// Initialize and turn on LED
+		boardled_init();    
 
     // Initialize GPIO pin for the 5V regulator
     board5V_init();
 
-    // Initialize I2C bus
-    i2c_init(); 
-    stc3100_init(BOARD_I2C_PORT, boot_count);
 	  
     // Initialize the plantower sensor
     dustsensor_init();
@@ -442,6 +475,12 @@ extern "C" void app_main(void)
 		ESP_LOGI(TAG, "Shutdown initiated ...");
     // Shutdown peripherals and prepare for deep sleep
     board_shutdown();
+    
+    // Turn off LED
+    boardled_shutdown();
+    
+    // Hold all gpios in deep sleep
+    //gpio_deep_sleep_hold_en();
 
     // Set parameters to wake up from deep sleep, 
     // currently wakeup on timeout 
