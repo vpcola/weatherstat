@@ -7,3 +7,6 @@
 [submodule "components/sh2x"]
 	path = components/sh2x
 	url = https://github.com/vpcola/sh2x.git
+[submodule "components/plantower5003"]
+	path = components/plantower5003
+	url = https://github.com/vpcola/plantower5003.git

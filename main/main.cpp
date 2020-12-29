@@ -31,6 +31,19 @@
 
 #include "TheThingsNetwork.h"
 
+typedef enum
+{
+    EV_DUST_DATA_UPDATE,
+    EV_LORA_MSG_RECV
+} main_task_event_t;
+
+typedef struct 
+{
+    main_task_event_t event;
+    dustsensor_t dust_data;
+} main_task_message_t;
+
+
 // NOTE:
 // The LoRaWAN frequency and the radio chip must be configured by running 'make menuconfig'.
 // Go to Components / The Things Network, select the appropriate values and save.
@@ -59,11 +72,11 @@ const char *appKey = "B0A5E5F30925E5E425C9C514E80AC2CC";
 #define BOARD_I2C_SCL	  GPIO_NUM_22
 #define BOARD_I2C_SPEED	  100000
 
-#define DEEP_SLEEP_SECONDS	(60 * 10) // Wakeup every 10 minutes
+#define DEEP_SLEEP_SECONDS	(60 * 5) // Wakeup every 10 minutes
 
 #define MAX_MESSAGE_LEN	  42
 
-#define DUSTSENSOR_UART_PORT UART_NUM_2
+#define DUSTSENSOR_UART_PORT UART_NUM_1
 #define DUSTSENSOR_UART_RX	 GPIO_NUM_16
 
 // Variable declarations
@@ -80,43 +93,70 @@ static dustsensor_parser_handle_t dustsensor_hdl;
 static QueueHandle_t main_task_queue;
 static SemaphoreHandle_t shutdown_sem;
 
-static const char *TAG = "main";
 
-//const unsigned TX_INTERVAL = 30;
+static const char *TAG = "main";
 
 
 void sendMessages(void* pvParameter)
 {
+		main_task_message_t msg;
     float temp, humid, batvol, batcur, batrmc, battemp;
+    bool hasDustData = false;
 
-    //while (1) {
-				// Read sensor data
-				sht21_humidity(BOARD_I2C_PORT, &humid);
-				printf("Relative Humidity: %f\n", humid);
-				sht21_temperature(BOARD_I2C_PORT, &temp);
-				printf("Temperature: %f\n", temp);
-				stc3100_get_battery_voltage(BOARD_I2C_PORT, &batvol);
-				printf("Battery Voltage : %.2f V\n", batvol);
-				stc3100_get_battery_current(BOARD_I2C_PORT, &batcur);
-				printf("Battery Current Draw: %.3f\n", batcur);
-				stc3100_get_battery_rem_charge(BOARD_I2C_PORT, &batrmc);
-				printf("Battery Remaining Charge: %.2f mAh\n", batrmc);
-				stc3100_get_battery_temperature(BOARD_I2C_PORT, &battemp);
-				printf("Battery Temperature : %.2f C\n", battemp);
-				lpp.reset();
-				lpp.addRelativeHumidity(0, humid);
-				lpp.addTemperature(1, temp);
-				lpp.addAnalogOutput(2, batvol);
-				//lpp.addAnalogOutput(3, batcur);
-				//lpp.addAnalogOutput(4, batrmc);
-				//lpp.addAnalogOutput(6, battemp);
+		// Read sensor data
+		sht21_humidity(BOARD_I2C_PORT, &humid);
+		printf("Relative Humidity: %f\n", humid);
+		sht21_temperature(BOARD_I2C_PORT, &temp);
+		printf("Temperature: %f\n", temp);
+		stc3100_get_battery_voltage(BOARD_I2C_PORT, &batvol);
+		printf("Battery Voltage : %.2f V\n", batvol);
+		stc3100_get_battery_current(BOARD_I2C_PORT, &batcur);
+		printf("Battery Current Draw: %.3f\n", batcur);
+		stc3100_get_battery_rem_charge(BOARD_I2C_PORT, &batrmc);
+		printf("Battery Remaining Charge: %.2f mAh\n", batrmc);
+		stc3100_get_battery_temperature(BOARD_I2C_PORT, &battemp);
+		printf("Battery Temperature : %.2f C\n", battemp);
+		
+		lpp.reset();
+		lpp.addRelativeHumidity(0, humid);
+		lpp.addTemperature(1, temp);
+		lpp.addAnalogOutput(2, batvol);
+		//lpp.addAnalogOutput(3, batcur);
+		//lpp.addAnalogOutput(4, batrmc);
+		//lpp.addAnalogOutput(6, battemp);
 
-        printf("Sending message...\n");
-        TTNResponseCode res = ttn.transmitMessage(lpp.getBuffer(), lpp.getSize());
-        printf(res == kTTNSuccessfulTransmission ? "Message sent.\n" : "Transmission failed.\n");
-	
-        // vTaskDelay(TX_INTERVAL * pdMS_TO_TICKS(1000));
-    //}
+		// Wait until we have dust data
+		while(!hasDustData)
+		{
+			xQueueReceive(main_task_queue, &(msg), portMAX_DELAY);
+			switch(msg.event)
+			{
+				case EV_DUST_DATA_UPDATE:
+						ESP_LOGI(TAG, "Receive dust sensor update!");
+						// Add dust data to lpp, only send standard measurements
+						lpp.addDigitalOutput(3, (uint8_t) msg.dust_data.pm1);
+						lpp.addDigitalOutput(4, (uint8_t) msg.dust_data.pm25);
+						lpp.addDigitalOutput(5, (uint8_t) msg.dust_data.pm10);
+        		ESP_LOGI(TAG, "Concentration Unit (Standard): PM1.0 = %d ug/cum, PM2.5 = %d ug/cum, PM10 = %d ug/cum", 
+                msg.dust_data.pm1,
+                msg.dust_data.pm25,
+                msg.dust_data.pm10);
+                						
+						hasDustData = true;
+						break;
+				default:
+					ESP_LOGE(TAG, "Unknown event type!");
+			}
+		}				
+				
+    printf("Sending message...\n");
+    TTNResponseCode res = ttn.transmitMessage(lpp.getBuffer(), lpp.getSize());
+    printf(res == kTTNSuccessfulTransmission ? "Message sent.\n" : "Transmission failed.\n");
+    	
+    // Signal the main routine that we exited
+    xSemaphoreGive(shutdown_sem);
+		// Remove this task
+		vTaskDelete(NULL);
 }
 
 void messageReceived(const uint8_t * message, size_t length, port_t port)
@@ -144,23 +184,23 @@ esp_err_t i2c_init(void)
 static void i2c_master_deinit(void)
 {
     if (i2c_driver_delete(BOARD_I2C_PORT) != ESP_OK)
-        ESP_LOGE(TAG, "Failed to uninstall I2C driver!\r\n");
+        ESP_LOGE(TAG, "Failed to uninstall I2C driver!");
         
     gpio_reset_pin(BOARD_I2C_SDA);
     gpio_reset_pin(BOARD_I2C_SCL);
 
     // Isolate the I2C pins, specially since they have external
     // pullup resistors
-    if (rtc_gpio_is_valid_gpio(BOARD_I2C_SDA))
-    {
-    	ESP_LOGI(TAG, "Isolateing SDA pin (%d)", (int) BOARD_I2C_SDA);
-    	rtc_gpio_isolate(BOARD_I2C_SDA);
-    }
-    if (rtc_gpio_is_valid_gpio(BOARD_I2C_SCL))
-    {
-    	ESP_LOGI(TAG, "Isolating SCL pin (%d)", (int) BOARD_I2C_SCL);
-    	rtc_gpio_isolate(BOARD_I2C_SCL);
-    }
+    //if (rtc_gpio_is_valid_gpio(BOARD_I2C_SDA))
+    //{
+    //	ESP_LOGI(TAG, "Isolateing SDA pin (%d)", (int) BOARD_I2C_SDA);
+    //	rtc_gpio_isolate(BOARD_I2C_SDA);
+    //}
+    //if (rtc_gpio_is_valid_gpio(BOARD_I2C_SCL))
+    //{
+    //	ESP_LOGI(TAG, "Isolating SCL pin (%d)", (int) BOARD_I2C_SCL);
+    //	rtc_gpio_isolate(BOARD_I2C_SCL);
+    //}
     
     ESP_LOGI(TAG, "I2C(%d) de-initialized", (int)BOARD_I2C_PORT);
 }
@@ -187,16 +227,7 @@ static void spi_bus_deinit(void)
 {
     // free the spi bus
     spi_bus_free(TTN_SPI_HOST);
-    
-
-    // isolate the pins
-    //if (rtc_gpio_is_valid_gpio(TTN_PIN_SPI_MISO))
-    //    rtc_gpio_isolate(TTN_PIN_SPI_MISO);
-    //if (rtc_gpio_is_valid_gpio(TTN_PIN_SPI_MOSI))
-    //    rtc_gpio_isolate(TTN_PIN_SPI_MOSI);
-    //if (rtc_gpio_is_valid_gpio(TTN_PIN_SPI_SCLK))
-    //    rtc_gpio_isolate(TTN_PIN_SPI_SCLK);
-    
+   
     ESP_LOGI(TAG, "SPI(%d) de-initalized", (int) TTN_SPI_HOST);
 }
 
@@ -204,21 +235,30 @@ static void spi_bus_deinit(void)
 static void dustsensor_event_handler(void *event_handler_arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
     dustsensor_t *sensor = NULL;
+		main_task_message_t main_message;      
+		
     switch (event_id) {
     case SENSOR_UPDATE:
         sensor = (dustsensor_t *)event_data;
         // Handle the data from the sensor here
-        ESP_LOGI(TAG, "Concentration Unit (Standard):\r\n"
-                "\tPM1.0 = %d ug/cum, PM2.5 = %d ug/cum, PM10 = %d ug/cum\r\n", 
-                sensor->pm1,
-                sensor->pm25,
-                sensor->pm10);
-        ESP_LOGI(TAG, "Concentration Unit (Environmental):\r\n"
-                "\tPM1.0 = %d ug/cum, PM2.5 = %d ug/cum, PM10 = %d ug/cum\r\n", 
-                sensor->pm1_atmospheric,
-                sensor->pm25_atmospheric,
-                sensor->pm10_atmospheric);
-
+        //ESP_LOGI(TAG, "Concentration Unit (Standard): PM1.0 = %d ug/cum, PM2.5 = %d ug/cum, PM10 = %d ug/cum", 
+        //        sensor->pm1,
+        //        sensor->pm25,
+        //       sensor->pm10);
+        //ESP_LOGI(TAG, "Concentration Unit (Environmental): PM1.0 = %d ug/cum, PM2.5 = %d ug/cum, PM10 = %d ug/cum", 
+        //        sensor->pm1_atmospheric,
+        //        sensor->pm25_atmospheric,
+        //        sensor->pm10_atmospheric);
+                
+				main_message.event = EV_DUST_DATA_UPDATE;
+				main_message.dust_data.pm1 = sensor->pm1;
+				main_message.dust_data.pm25 = sensor->pm25;
+				main_message.dust_data.pm10 = sensor->pm10;
+				main_message.dust_data.pm1_atmospheric = sensor->pm1_atmospheric;
+				main_message.dust_data.pm25_atmospheric = sensor->pm25_atmospheric;
+				main_message.dust_data.pm10_atmospheric = sensor->pm10_atmospheric;
+				// Send to queue
+				xQueueSend(main_task_queue, (void *) &main_message, (TickType_t) 0);
         break;
     case SENSOR_UNKNOWN:
         /* print unknown statements */
@@ -251,8 +291,8 @@ static void dustsensor_deinit(void)
        ESP_LOGE(TAG, "Dustsensor de-initialization error!\r\n");
 
    // Reset pins used by the dust sensor
-   if (rtc_gpio_is_valid_gpio(DUSTSENSOR_UART_RX))
-   	   rtc_gpio_isolate(DUSTSENSOR_UART_RX);
+   //if (rtc_gpio_is_valid_gpio(DUSTSENSOR_UART_RX))
+   //	   rtc_gpio_isolate(DUSTSENSOR_UART_RX);
    
    ESP_LOGI(TAG, "Dust Sensor de-initialize");
 }
@@ -300,7 +340,7 @@ static void board_shutdown()
     i2c_master_deinit();
     
     // Shutdown the dust sensor
-    //dustsensor_deinit();
+    dustsensor_deinit();
 
     // Power down the 5V regulator
     printf("Shutting down 5V regulator ...\n");
@@ -367,23 +407,39 @@ extern "C" void app_main(void)
     stc3100_init(BOARD_I2C_PORT, boot_count);
 	  
     // Initialize the plantower sensor
-    //dustsensor_init();
-
+    dustsensor_init();
+    
+    ESP_LOGI(TAG, "Creating main message queue\r\n");
+    /* Create the main task message queue */
+    main_task_queue = xQueueCreate(10, sizeof(main_task_message_t));
+    if ( main_task_queue == 0)
+    {
+        ESP_LOGE(TAG, "Failed in creating main task queue!");
+    }
+    
+    /* Create the shutdown semaphore */
+    shutdown_sem = xSemaphoreCreateBinary();
+    
 
     printf("Joining...\n");
     if (ttn.join())
     {
         printf("Re-Join/Joined sucessful!\n");
-        //xTaskCreate(sendMessages, "send_messages", 1024 * 4, (void* )0, 3, nullptr);
-        sendMessages(NULL); 
+        xTaskCreate(sendMessages, "send_messages", 1024 * 4, (void* )0, 3, nullptr);
+        
+        // Wait untill all messages are sent
+        xSemaphoreTake(shutdown_sem, portMAX_DELAY);
     }
     else
     {
         printf("Join failed. Goodbye\n");
     }
-    printf("Waiting for incoming messages (10s) ...\n");
-    vTaskDelay(10 * pdMS_TO_TICKS(1000));
     
+    // Delete the queue and semaphores
+	  vQueueDelete(main_task_queue);
+	  vSemaphoreDelete(shutdown_sem);
+	  
+		ESP_LOGI(TAG, "Shutdown initiated ...");
     // Shutdown peripherals and prepare for deep sleep
     board_shutdown();
 
