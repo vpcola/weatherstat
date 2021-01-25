@@ -78,8 +78,13 @@ const char *appKey = "B0A5E5F30925E5E425C9C514E80AC2CC";
 
 #define MAX_MESSAGE_LEN	  42
 
-#define DUSTSENSOR_UART_PORT UART_NUM_1
+#define DUSTSENSOR_UART_PORT UART_NUM_2
 #define DUSTSENSOR_UART_RX	 GPIO_NUM_16
+#define DUSTSENSOR_UART_TX	 GPIO_NUM_NC
+
+// There is an external pull up resistor on these two pins
+#define WINDDIR_PIN					 GPIO_NUM_36
+#define WAKEUP_PIN					 GPIO_NUM_39	
 
 // Variable declarations
 static TheThingsNetwork ttn;
@@ -274,6 +279,7 @@ static void dustsensor_init(void)
     dustsensor_parser_config_t config = DUSTSENSOR_PARSER_CONFIG_DEFAULT();
     config.uart.uart_port = (uart_port_t) DUSTSENSOR_UART_PORT;
     config.uart.rx_pin = DUSTSENSOR_UART_RX;
+    config.uart.tx_pin = DUSTSENSOR_UART_TX;
     /* init NMEA parser library */
     dustsensor_hdl = dustsensor_parser_init(&config);
     /* register event handler for NMEA parser library */
@@ -290,8 +296,8 @@ static void dustsensor_deinit(void)
        ESP_LOGE(TAG, "Dustsensor de-initialization error!\r\n");
 
    // Reset pins used by the dust sensor
-   //if (rtc_gpio_is_valid_gpio(DUSTSENSOR_UART_RX))
-   //	   rtc_gpio_isolate(DUSTSENSOR_UART_RX);
+   //gpio_reset_pin(DUSTSENSOR_UART_RX);
+   //gpio_reset_pin(DUSTSENSOR_UART_TX);
    
    ESP_LOGI(TAG, "Dust Sensor de-initialize");
 }
@@ -371,6 +377,12 @@ static void board_shutdown()
     // Power down the 5V regulator
     printf("Shutting down 5V regulator ...\n");
     board5V_shutdown();
+    
+    // Isolate these gpios
+    rtc_gpio_isolate(GPIO_NUM_12);
+    rtc_gpio_isolate(GPIO_NUM_15);    
+    rtc_gpio_isolate(WINDDIR_PIN);
+    rtc_gpio_isolate(WAKEUP_PIN);
 }
 
 extern "C" void app_main(void)
